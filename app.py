@@ -5,6 +5,7 @@ import re
 from dotenv import load_dotenv
 
 from rag_engine import extract_text
+from graph import a
 
 load_dotenv()
 
@@ -69,5 +70,5 @@ with tab_hr:
             }
             
             st.write('### Running Graph...')
-           # fro event
+            for event in app
     
