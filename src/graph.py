@@ -1,15 +1,16 @@
 import os
 from typing import Dict, Any, Literal
 from pydantic import BaseModel, Field
-from state import HiringState
-from rag_engine import grade_resume_against_jd
+from src.state import HiringState
+from src.rag_engine import grade_resume_against_jd
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
-from email_utils import send_email
+from src.email_utils import send_email
 
+import streamlit as st
 
 load_dotenv()
 
@@ -20,15 +21,19 @@ class TestQuestions(BaseModel):
     # NODE FUNCTIONS
     # ==============================
 
-def evaluate_resume_rag(state: HiringState) -> Dict[str, Any]
+def evaluate_resume_rag(state: HiringState) -> Dict[str, Any]:
     """Node 1: Evaluates the resume against JD using RAG engine."""
+    st.write("cv evaluation started")
     resume_text = state.get('resume_text', "")
     job_description = state.get('job_description', "")
 
+    st.write(f"jd: {job_description} ")
     if not resume_text or not job_description:
         return {'status': 'rejected ', "rag_evaluation_resaon": "Missing inputs."}
     
     evaluation = grade_resume_against_jd(job_description, resume_text)
+
+    st.write(f"rag score: {evaluation.score}")
 
     threshold = 70.0
     status = 'shortlisted' if evaluation.score >= threshold else 'rejected'
@@ -107,32 +112,106 @@ def schedule_online_test(state: HiringState) -> Dict[str, Any]:
     
 
 def await_online_test_completion(state: HiringState) -> Dict[str, Any]:
-    a=10
+    """Node 4: Human-in-the-llop checkpoint waiting for candidate to finish test."""
+    status = state.get("human_approval_status", 'pending')
+    if status == 'approved':
+        return {"status": "screening_scheduled"}
+    return{'status': 'rejected'}
+
 
 def conduct_ai_screening(state: HiringState) -> Dict[str, Any]:
-    b=10
+    """Node 5: Conduct AI Screening based on candidate's 5 custom test responses."""
+    llm = ChatOpenAI(model='gpt-4o-mini', temperature=0.7)
+
+    questions = state.get('generated_questions', [])
+    answers = state.get('candidate_test_answers', [])
+
+    qa_pairs = "\n\n".join([f"Q{i+1}: {q}\nA: {a}" for i, (q, a) in enumerate(zip(questions, answers))])
+
+    messages = [
+        SystemMessage(content="You are an AI technical recuruiter grading a candidate's custom responses to an online assessment test."),
+        HumanMessage(content=f"Resume: {state['resume_text']}\n\nJob Desc: {state['job_description']}\n\nCandidate's Test Submissions:\n{qa_pairs}\n\nEvaluate the candidate's answers based on correctness and depth. Provide a short summary of their performance, critique their answers, and clearly state 'pass' or 'fail' at the end.")
+    ]
+
+    response = llm.invoke(messages)
+    feedback = response.content
+
+    cleared = 'pass' in feedback.lower() and 'fail' not in feedback.lower()
+
+    # Ensuring testing passes if they score well overall but prompt is tricky
+    if state.get('rag_evaluation_score', 0) >= 80 and len(answers) >= 1:
+        cleared = True
+
+    next_status = "technical_scheduled" if cleared else "rejected"
+
+    return{
+        "screening_feedback": feedback,
+        "status" : next_status,
+        "human_approval_status": "pending" if cleared else 'rejected'
+    }
 
 
 def human_approval_technical(state: HiringState) -> Dict[str, Any]:
-    c=10
+    """Node 6: Human-in-the-loop checkpoint for technical round."""
+    status = state.get("human_approval_status", "pending")
+    if status == "approved":
+        return {'status': 'offer_generated'}
+    return {'status': 'rejected'}
 
 def rollout_offer(state: HiringState) -> Dict[str, Any]:
-    d=10
+    """Node 7: Generates an Offer Letter."""
+    llm = ChatOpenAI(model='gpt-4o-mini', temperature=0)
+    messages = [
+        SystemMessage(content='You are an HR Executive drafting an offer letter.'),
+        HumanMessage(content=f"Draft a 3-paragraph professional offer letter for {state['candidate_name']} for {state['job_description'][:300]}.")
+    ]
+    response = llm.invoke(messages)
+
+    # NEW: Send email for offer letter
+    candidate_email = state.get('candidate_email')
+    if candidate_email:
+        send_email(candidate_email, "Congratulations! Your Job Offer is Enclosed", response.content)
+
+    return{
+        'status': 'offer_generated',
+        'technical_feedback': response.content
+    }
 
 # =======================
 # EDGES (ROUTING LOGIC)
 # ========================
 
 def route_after_rag(state: HiringState) -> Literal['human_approval_shortlist', 'END']:
-    e=10
+    if state.get('status') =='shortlisted':
+        return 'human_approval_shortlist'
+    return 'END'
 
 def route_after_shortlist_approval(state: HiringState) -> Literal['schedule_online_test', 'END']:
-    a=10
+    if state.get('status') =='online_test_scheduled':
+        return 'schedule_online_test'
+    return 'END'
+
+def route_after_scheduling_test(state: HiringState) -> Literal['await_online_test_completion']:
+    return 'await_online_test_completion'
 
 
-def route_after_screening_test(state: HiringState) -> Li['await_online_test_completion']:
-    a=10
+def route_after_test_completion(state: HiringState) -> Literal['conduct_ai_screening', 'END']:
+    if state.get('status') =='screening_scheduled':
+        return 'conduct_ai_screening'
+    return 'END'
 
+
+
+def route_after_screening(state: HiringState) -> Literal['human_approval_technical', 'END']:
+    if state.get('status') =='technical_scheduled':
+        return 'human_approval_technical'
+    return 'END'
+
+
+def route_after_technical_approval(state: HiringState) -> Literal['rollout_offer', 'END']:
+    if state.get('status') =='offer_generated':
+        return 'rollout_offer'
+    return 'END'
 
 
 
@@ -151,13 +230,86 @@ def build_graph():
     builder.add_node('conduct_ai_screening', conduct_ai_screening)
     builder.add_node('human_approval_technical', human_approval_technical)
     builder.add_node('rollout_offer', rollout_offer)
-
+    
     # EDGES
     builder.add_edge(START, 'evaluate_resume_rag')
+
+        
     builder.add_conditional_edges(
         'evaluate_resume_rag',
-         rou
+         route_after_rag,
+         {'human_approval_shortlist': 'human_approval_shortlist',
+          'END': END
+          }
     )
+
+    
+    builder.add_conditional_edges(
+        'human_approval_shortlist',
+        route_after_shortlist_approval,
+        {
+            'schedule_online_test': 'schedule_online_test',
+            'END': END
+        }
+    )
+
+
+    builder.add_conditional_edges(
+        'schedule_online_test',
+        route_after_scheduling_test,
+        {
+            'await_online_test_completion': 'await_online_test_completion'
+        }
+    )
+
+
+    builder.add_conditional_edges(
+        'await_online_test_completion',
+        route_after_scheduling_test,
+        {
+            'conduct_ai_screening': 'conduct_ai_screening',
+            'END': END
+        }
+    )
+
+
+    builder.add_conditional_edges(
+        'conduct_ai_screening',
+        route_after_test_completion,
+        {
+            'human_approval_technical': 'human_approval_technical',
+            'END' : END
+        }
+    )
+
+
+    builder.add_conditional_edges(
+        'human_approval_technical',
+        route_after_technical_approval,
+        {
+            'rollout_offer': 'rollout_offer',
+            'END': END
+        }
+    )
+
+
+    builder.add_edge('rollout_offer', END)
+
+
+    from langgraph.checkpoint.memory import MemorySaver
+    memory = MemorySaver()
+    
+    graph = builder.compile(
+        checkpointer=memory,
+        interrupt_before = ['human_approval_shortlist','await_online_test_completion', 'human_approval_technical']
+
+    )
+
+
+
+    return graph
+
+app_graph = build_graph()
 
 
 

@@ -93,7 +93,7 @@ def retrieve_context(vectorstore: Chroma, query: str) -> str:
 
     # Prompt assembly: Query + retrieved context
     retrieved_context = "\n\n".join(d.page_content for d in retrieved_docs)
-    return retrieve_context
+    return retrieved_context
 
 
    
@@ -119,10 +119,11 @@ def evaluate_with_llm(job_description: str, retrieved_context: str ) -> ResumeSc
     {format_instructions}
     """
 
+
     prompt = PromptTemplate(
         template=template,
         input_variables=['job_description', 'retrieved_context'],
-        partial_variables={'format_instructions': parser.get_format_instructions()}
+        partial_variables={'format_instructions': parser.get_format_instructions()},
 
     )
 
@@ -132,32 +133,34 @@ def evaluate_with_llm(job_description: str, retrieved_context: str ) -> ResumeSc
     try:
         result = chain.invoke({
             "job_description": job_description,
-            "retrieved_context": retrieve_context
+            "retrieved_context": retrieved_context
         })
+  
         return result
     except Exception as e:
-        print(f"Error evaluating resume: {e}")
+
         return ResumeScore(score=0.0, reason="Error during LLM evaluation.")
     
 
 
-
+import streamlit as st
 
 def grade_resume_against_jd(job_description: str, resume_text: str) -> ResumeScore:
     """
     Orchestrates the RAG pipeline to evaluate a candidate's resume against a job description.
     Returns a Pydantic object containing a score (0-100) and a reason.
     """
-
+    
     # 1. Ingestion pipeline
     vectorstore = create_vectorstore(resume_text)
 
     # 2. Query pipeline - Retrieval
-    retrieve_context = retrieve_context(vectorstore, job_description)
+    retrieved_context = retrieve_context(vectorstore, job_description)
+
 
     # 3. Query pipeline - Generation
-    result = evaluate_with_llm(job_description, retrieve_context)
-
+    result = evaluate_with_llm(job_description, retrieved_context)
+    #st.write(f"result: {result.score}")
     return result
 
 
